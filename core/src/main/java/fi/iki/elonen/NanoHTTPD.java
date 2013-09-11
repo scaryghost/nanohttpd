@@ -6,6 +6,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * A simple, tiny, nicely embeddable HTTP server in Java
@@ -68,8 +70,11 @@ public abstract class NanoHTTPD {
      * Pseudo-Parameter to use to store the actual query string in the parameters map for later re-processing.
      */
     private static final String QUERY_STRING_PARAMETER = "NanoHttpd.QUERY_STRING";
+    public static Logger logger;
+    public static Level logLevel;
     private final String hostname;
     private final int myPort;
+    private int id;
     private ServerSocket myServerSocket;
     private Thread myThread;
     /**
@@ -94,6 +99,7 @@ public abstract class NanoHTTPD {
     public NanoHTTPD(String hostname, int port) {
         this.hostname = hostname;
         this.myPort = port;
+        this.id= 0;
         setTempFileManagerFactory(new DefaultTempFileManagerFactory());
         setAsyncRunner(new DefaultAsyncRunner());
     }
@@ -151,7 +157,12 @@ public abstract class NanoHTTPD {
                                     try {
                                         outputStream = finalAccept.getOutputStream();
                                         TempFileManager tempFileManager = tempFileManagerFactory.create();
-                                        HTTPSession session = new HTTPSession(tempFileManager, inputStream, outputStream);
+                                        HTTPSession session = new HTTPSession(id, tempFileManager, inputStream, outputStream);
+                                        
+                                        if (logger != null) {
+                                            logger.log(logLevel, String.format("Received connection from %s:%d", 
+                                                    finalAccept.getInetAddress().getHostAddress(),finalAccept.getPort()));
+                                        }
                                         while (!finalAccept.isClosed()) {
                                             session.execute();
                                         }
@@ -171,6 +182,7 @@ public abstract class NanoHTTPD {
                         }
                     } catch (IOException e) {
                     }
+                    id++;
                 } while (!myServerSocket.isClosed());
             }
         });
@@ -543,7 +555,7 @@ public abstract class NanoHTTPD {
         /**
          * Sends given response to the socket.
          */
-        private void send(OutputStream outputStream) {
+        private void send(int id, OutputStream outputStream) {
             String mime = mimeType;
             SimpleDateFormat gmtFrmt = new SimpleDateFormat("E, d MMM yyyy HH:mm:ss 'GMT'", Locale.US);
             gmtFrmt.setTimeZone(TimeZone.getTimeZone("GMT"));
@@ -554,7 +566,9 @@ public abstract class NanoHTTPD {
                 }
                 PrintWriter pw = new PrintWriter(outputStream);
                 pw.print("HTTP/1.1 " + status.getDescription() + " \r\n");
-
+                if (logger != null) {
+                    logger.log(logLevel, String.format("Response (%d)= HTTP/1.1 %s", id, status.getDescription()));
+                }
                 if (mime != null) {
                     pw.print("Content-Type: " + mime + "\r\n");
                 }
@@ -576,7 +590,7 @@ public abstract class NanoHTTPD {
 
                 pw.print("\r\n");
                 pw.flush();
-
+                
                 if (requestMethod != Method.HEAD && data != null) {
                     int BUFFER_SIZE = 16 * 1024;
                     byte[] buff = new byte[BUFFER_SIZE];
@@ -699,11 +713,13 @@ public abstract class NanoHTTPD {
         private Map<String, String> parms;
         private Map<String, String> headers;
         private CookieHandler cookies;
+        private final int id;
 
-        public HTTPSession(TempFileManager tempFileManager, InputStream inputStream, OutputStream outputStream) {
+        public HTTPSession(int id, TempFileManager tempFileManager, InputStream inputStream, OutputStream outputStream) {
             this.tempFileManager = tempFileManager;
             this.inputStream = inputStream;
             this.outputStream = outputStream;
+            this.id= id;
         }
 
         public void execute() throws IOException {
@@ -755,6 +771,9 @@ public abstract class NanoHTTPD {
 
                 cookies = new CookieHandler(headers);
 
+                if (logger != null) {
+                    logger.log(logLevel, String.format("Request (%d)= %s %s %s", id, method, uri, parms.get(QUERY_STRING_PARAMETER)));
+                }
                 // Ok, now do the serve()
                 Response r = serve(this);
                 if (r == null) {
@@ -762,18 +781,18 @@ public abstract class NanoHTTPD {
                 } else {
                     cookies.unloadQueue(r);
                     r.setRequestMethod(method);
-                    r.send(outputStream);
+                    r.send(id, outputStream);
                 }
             } catch (SocketException e) {
                 // throw it out to close socket object (finalAccept)
                 throw e;
             } catch (IOException ioe) {
                 Response r = new Response(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "SERVER INTERNAL ERROR: IOException: " + ioe.getMessage());
-                r.send(outputStream);
+                r.send(id, outputStream);
                 safeClose(outputStream);
             } catch (ResponseException re) {
                 Response r = new Response(re.getStatus(), MIME_PLAINTEXT, re.getMessage());
-                r.send(outputStream);
+                r.send(id, outputStream);
                 safeClose(outputStream);
             } finally {
                 tempFileManager.clear();
